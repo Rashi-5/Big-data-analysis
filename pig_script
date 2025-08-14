@@ -1,0 +1,183 @@
+-- ========================================
+-- Mental Health Analysis using Apache Pig
+-- ========================================
+
+-- Load the raw data from HDFS
+raw_data = LOAD '/user/rashi/mental_health.csv' 
+    USING PigStorage(',')
+    AS (timestamp:chararray, gender:chararray, country:chararray, 
+        occupation:chararray, self_employed:chararray, family_history:chararray,
+        treatment:chararray, days_indoors:chararray, growing_stress:chararray,
+        changes_habits:chararray, mental_health_history:chararray, mood_swings:chararray,
+        coping_struggles:chararray, work_interest:chararray, social_weakness:chararray,
+        mental_health_interview:chararray, care_options:chararray);
+
+-- Remove header row
+data_no_header = FILTER raw_data BY timestamp != 'Timestamp';
+
+-- Clean and standardize the data
+cleaned_data = FOREACH data_no_header GENERATE
+    gender,
+    country,
+    occupation,
+    (self_employed is null ? 'Unknown' : self_employed) AS self_employed,
+    (family_history is null ? 'Unknown' : family_history) AS family_history,
+    (treatment is null ? 'Unknown' : treatment) AS treatment,
+    days_indoors,
+    (growing_stress is null ? 'Unknown' : growing_stress) AS growing_stress,
+    changes_habits,
+    mental_health_history,
+    (mood_swings is null ? 'Low' : mood_swings) AS mood_swings,
+    (coping_struggles is null ? 'Unknown' : coping_struggles) AS coping_struggles,
+    (work_interest is null ? 'Unknown' : work_interest) AS work_interest,
+    (social_weakness is null ? 'Unknown' : social_weakness) AS social_weakness,
+    mental_health_interview,
+    (care_options is null ? 'Unknown' : care_options) AS care_options;
+
+-- ANALYSIS 1: Demographics & Mental Health Patterns
+
+-- Gender-based mental health analysis
+gender_analysis = GROUP cleaned_data BY gender;
+gender_stats = FOREACH gender_analysis GENERATE
+    group AS gender,
+    COUNT(cleaned_data) AS total_count,
+    COUNT(FILTER cleaned_data BY treatment == 'Yes') AS seeking_treatment,
+    COUNT(FILTER cleaned_data BY family_history == 'Yes') AS family_history_yes,
+    COUNT(FILTER cleaned_data BY growing_stress == 'Yes') AS stress_cases,
+    COUNT(FILTER cleaned_data BY coping_struggles == 'Yes') AS coping_issues,
+    COUNT(FILTER cleaned_data BY social_weakness == 'Yes') AS social_issues;
+
+-- Add calculated percentages
+gender_final = FOREACH gender_stats GENERATE
+    gender,
+    total_count,
+    seeking_treatment,
+    (double)seeking_treatment / total_count * 100 AS treatment_percentage,
+    (double)family_history_yes / total_count * 100 AS family_history_percentage,
+    (double)stress_cases / total_count * 100 AS stress_percentage,
+    (double)coping_issues / total_count * 100 AS coping_percentage,
+    (double)social_issues / total_count * 100 AS social_percentage;
+
+-- ANALYSIS 2: Country-wise Mental Health Infrastructure
+
+-- Analyze care options availability by country
+country_analysis = GROUP cleaned_data BY country;
+country_care = FOREACH country_analysis GENERATE
+    group AS country,
+    COUNT(cleaned_data) AS total_responses,
+    COUNT(FILTER cleaned_data BY care_options == 'Yes') AS care_available,
+    COUNT(FILTER cleaned_data BY care_options == 'No') AS no_care,
+    COUNT(FILTER cleaned_data BY care_options == 'Not sure') AS unsure_care,
+    COUNT(FILTER cleaned_data BY treatment == 'Yes') AS getting_treatment,
+    COUNT(FILTER cleaned_data BY mental_health_interview == 'Yes') AS willing_interview;
+
+-- Calculate care infrastructure metrics
+country_infrastructure = FOREACH country_care GENERATE
+    country,
+    total_responses,
+    care_available,
+    (double)care_available / total_responses * 100 AS care_availability_rate,
+    (double)getting_treatment / total_responses * 100 AS treatment_rate,
+    (double)willing_interview / total_responses * 100 AS interview_willingness,
+    -- Care gap: people who need care but don't have access
+    (getting_treatment > care_available ? 0 : care_available - getting_treatment) AS care_surplus;
+
+-- ANALYSIS 3: Occupation Risk Profiling
+
+-- Create occupation risk profiles
+occupation_analysis = GROUP cleaned_data BY occupation;
+occupation_risk = FOREACH occupation_analysis GENERATE
+    group AS occupation,
+    COUNT(cleaned_data) AS total_count,
+    COUNT(FILTER cleaned_data BY treatment == 'Yes') AS treatment_seekers,
+    COUNT(FILTER cleaned_data BY work_interest == 'No') AS lost_work_interest,
+    COUNT(FILTER cleaned_data BY growing_stress == 'Yes') AS stress_cases,
+    COUNT(FILTER cleaned_data BY mood_swings == 'High') AS high_mood_swings,
+    COUNT(FILTER cleaned_data BY coping_struggles == 'Yes') AS coping_struggles,
+    COUNT(FILTER cleaned_data BY changes_habits == 'Yes') AS habit_changes;
+
+-- Calculate occupation risk scores and metrics
+occupation_metrics = FOREACH occupation_risk GENERATE
+    occupation,
+    total_count,
+    treatment_seekers,
+    (double)treatment_seekers / total_count * 100 AS treatment_rate,
+    (double)lost_work_interest / total_count * 100 AS work_disinterest_rate,
+    (double)stress_cases / total_count * 100 AS stress_rate,
+    -- Risk score calculation (0-100 scale)
+    ((double)(stress_cases + high_mood_swings + coping_struggles + habit_changes) / total_count) * 25 AS risk_score,
+    -- Severity classification
+    (((double)(stress_cases + high_mood_swings + coping_struggles) / total_count) > 0.7 ? 'High Risk' : 
+     (((double)(stress_cases + high_mood_swings + coping_struggles) / total_count) > 0.4 ? 'Medium Risk' : 'Low Risk')) AS risk_level;
+
+-- ANALYSIS 4: Self-Employment vs Corporate Mental Health
+
+-- Compare self-employed vs corporate employees
+employment_comparison = GROUP cleaned_data BY self_employed;
+employment_stats = FOREACH employment_comparison GENERATE
+    group AS employment_type,
+    COUNT(cleaned_data) AS total_count,
+    COUNT(FILTER cleaned_data BY treatment == 'Yes') AS treatment_seekers,
+    COUNT(FILTER cleaned_data BY growing_stress == 'Yes') AS stress_cases,
+    COUNT(FILTER cleaned_data BY social_weakness == 'Yes') AS social_issues,
+    COUNT(FILTER cleaned_data BY work_interest == 'No') AS work_disinterest,
+    COUNT(FILTER cleaned_data BY care_options == 'Yes') AS care_access;
+
+employment_final = FOREACH employment_stats GENERATE
+    employment_type,
+    total_count,
+    (double)treatment_seekers / total_count * 100 AS treatment_percentage,
+    (double)stress_cases / total_count * 100 AS stress_percentage,
+    (double)social_issues / total_count * 100 AS social_issues_percentage,
+    (double)work_disinterest / total_count * 100 AS work_disinterest_percentage,
+    (double)care_access / total_count * 100 AS care_access_percentage;
+
+-- ANALYSIS 5: Days Indoors Impact Analysis
+
+-- Analyze correlation between days spent indoors and mental health
+indoors_analysis = GROUP cleaned_data BY days_indoors;
+indoors_impact = FOREACH indoors_analysis GENERATE
+    group AS days_indoors_category,
+    COUNT(cleaned_data) AS total_count,
+    COUNT(FILTER cleaned_data BY growing_stress == 'Yes') AS stress_cases,
+    COUNT(FILTER cleaned_data BY mood_swings == 'High') AS high_mood_swings,
+    COUNT(FILTER cleaned_data BY social_weakness == 'Yes') AS social_weakness,
+    COUNT(FILTER cleaned_data BY treatment == 'Yes') AS seeking_treatment;
+
+indoors_final = FOREACH indoors_impact GENERATE
+    days_indoors_category,
+    total_count,
+    (double)stress_cases / total_count * 100 AS stress_rate,
+    (double)high_mood_swings / total_count * 100 AS mood_swing_rate,
+    (double)social_weakness / total_count * 100 AS social_weakness_rate,
+    (double)seeking_treatment / total_count * 100 AS treatment_rate;
+
+-- SAVE RESULTS FOR POWER BI
+
+-- Store all analysis results
+STORE gender_final INTO '/user/rashi/pig_gender_analysis' USING PigStorage(',');
+STORE country_infrastructure INTO '/user/rashi/pig_country_analysis' USING PigStorage(',');
+STORE occupation_metrics INTO '/user/rashi/pig_occupation_analysis' USING PigStorage(',');
+STORE employment_final INTO '/user/rashi/pig_employment_analysis' USING PigStorage(',');
+STORE indoors_final INTO '/user/rashi/pig_indoors_analysis' USING PigStorage(',');
+
+-- Create a comprehensive summary dataset
+summary_data = FOREACH cleaned_data GENERATE
+    gender,
+    country,
+    occupation,
+    self_employed,
+    family_history,
+    treatment,
+    days_indoors,
+    growing_stress,
+    mood_swings,
+    coping_struggles,
+    work_interest,
+    social_weakness,
+    care_options;
+
+STORE summary_data INTO '/user/rashi/pig_processed_dataset' USING PigStorage(',');
+
+-- Print completion message
+DUMP (LIMIT gender_final 3);
