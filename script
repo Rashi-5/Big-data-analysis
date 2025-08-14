@@ -1,0 +1,177 @@
+// Load the CSV file from HDFS (using your actual file path)
+val df = spark.read
+  .option("header", "true")
+  .option("inferSchema", "true")
+  .csv("mental_health.csv")
+
+// Check the data structure
+df.printSchema()
+df.show(5)
+
+// Get basic statistics
+println("Total Records: " + df.count())
+df.describe().show()
+
+// Check for null values in key columns
+import org.apache.spark.sql.functions._
+df.select(df.columns.map(c => sum(col(c).isNull.cast("int")).alias(c)): _*).show()
+
+// Clean the data - handle nulls and standardize
+val cleanedDF = df
+  .filter(col("Gender").isNotNull && col("Country").isNotNull)
+  .withColumn("self_employed", when(col("self_employed").isNull, "Unknown").otherwise(col("self_employed")))
+  .withColumn("family_history", when(col("family_history").isNull, "Unknown").otherwise(col("family_history")))
+  .withColumn("treatment", when(col("treatment").isNull, "Unknown").otherwise(col("treatment")))
+
+// Create a risk score based on multiple factors
+val riskScoredDF = cleanedDF
+  .withColumn("risk_score", 
+    when(col("family_history") === "Yes", 2).otherwise(0) +
+    when(col("treatment") === "Yes", 3).otherwise(0) +
+    when(col("Growing_Stress") === "Yes", 2).otherwise(0) +
+    when(col("Mood_Swings") === "High", 3).when(col("Mood_Swings") === "Medium", 2).otherwise(1) +
+    when(col("Coping_Struggles") === "Yes", 2).otherwise(0) +
+    when(col("Social_Weakness") === "Yes", 2).otherwise(0)
+  )
+  .withColumn("risk_category", 
+    when(col("risk_score") >= 8, "High Risk")
+    .when(col("risk_score") >= 5, "Medium Risk")
+    .otherwise("Low Risk")
+  )
+
+println("Data cleaned and risk scores calculated!")
+riskScoredDF.show(10)
+
+println("=== RISK PROFILE ANALYSIS ===")
+
+// Risk distribution
+val riskDistribution = riskScoredDF
+  .groupBy("risk_category")
+  .agg(
+    count("*").alias("count"),
+    round(count("*") * 100.0 / riskScoredDF.count(), 2).alias("percentage")
+  )
+  .orderBy(desc("count"))
+
+riskDistribution.show()
+
+// Risk by gender
+val riskByGender = riskScoredDF
+  .groupBy("Gender", "risk_category")
+  .count()
+  .orderBy("Gender", "risk_category")
+
+riskByGender.show()
+
+println("=== WORKPLACE ANALYSIS ===")
+
+// Mental health indicators by occupation
+val workplaceAnalysis = riskScoredDF
+  .groupBy("Occupation")
+  .agg(
+    count("*").alias("total_responses"),
+    sum(when(col("treatment") === "Yes", 1).otherwise(0)).alias("seeking_treatment"),
+    sum(when(col("Work_Interest") === "No", 1).otherwise(0)).alias("lost_work_interest"),
+    sum(when(col("Growing_Stress") === "Yes", 1).otherwise(0)).alias("growing_stress"),
+    round(avg("risk_score"), 2).alias("avg_risk_score")
+  )
+  .withColumn("treatment_rate", round(col("seeking_treatment") * 100.0 / col("total_responses"), 2))
+  .withColumn("stress_rate", round(col("growing_stress") * 100.0 / col("total_responses"), 2))
+  .orderBy(desc("avg_risk_score"))
+
+workplaceAnalysis.show()
+
+// Self-employed vs Corporate comparison
+val employmentAnalysis = riskScoredDF
+  .filter(col("self_employed") !== "Unknown")
+  .groupBy("self_employed")
+  .agg(
+    count("*").alias("count"),
+    round(avg("risk_score"), 2).alias("avg_risk_score"),
+    sum(when(col("treatment") === "Yes", 1).otherwise(0)).alias("treatment_seekers"),
+    sum(when(col("Social_Weakness") === "Yes", 1).otherwise(0)).alias("social_issues")
+  )
+  .withColumn("treatment_percentage", round(col("treatment_seekers") * 100.0 / col("count"), 2))
+
+employmentAnalysis.show()
+
+println("=== TREATMENT GAP ANALYSIS ===")
+
+// Who needs treatment but isn't getting it?
+val treatmentGap = riskScoredDF
+  .withColumn("needs_treatment", 
+    when(col("risk_score") >= 5 || col("Coping_Struggles") === "Yes" || col("Mood_Swings") === "High", "Yes")
+    .otherwise("No")
+  )
+  .groupBy("needs_treatment", "treatment")
+  .count()
+  .orderBy("needs_treatment", "treatment")
+
+treatmentGap.show()
+
+// Treatment by country (if you have multiple countries)
+val treatmentByCountry = riskScoredDF
+  .groupBy("Country")
+  .agg(
+    count("*").alias("total"),
+    sum(when(col("treatment") === "Yes", 1).otherwise(0)).alias("treated"),
+    sum(when(col("care_options") === "Yes", 1).otherwise(0)).alias("care_available")
+  )
+  .withColumn("treatment_rate", round(col("treated") * 100.0 / col("total"), 2))
+  .orderBy(desc("treatment_rate"))
+
+treatmentByCountry.show()
+
+// Create final dataset for Power BI
+val powerBIDataset = riskScoredDF.select(
+  col("Gender"),
+  col("Country"), 
+  col("Occupation"),
+  col("self_employed"),
+  col("family_history"),
+  col("treatment"),
+  col("Growing_Stress"),
+  col("Mood_Swings"),
+  col("Coping_Struggles"),
+  col("Work_Interest"),
+  col("Social_Weakness"),
+  col("risk_score"),
+  col("risk_category")
+)
+
+// Save to HDFS as CSV for Power BI import
+powerBIDataset
+  .coalesce(1)
+  .write
+  .mode("overwrite")
+  .option("header", "true")
+  .csv("hdfs://localhost:9000/user/rashi/powerbi_dataset")
+
+// Save analysis results
+riskDistribution
+  .coalesce(1)
+  .write
+  .mode("overwrite")
+  .option("header", "true")
+  .csv("hdfs://localhost:9000/user/rashi/risk_distribution")
+
+workplaceAnalysis
+  .coalesce(1)
+  .write
+  .mode("overwrite")
+  .option("header", "true")
+  .csv("hdfs://localhost:9000/user/rashi/workplace_analysis")
+
+employmentAnalysis
+  .coalesce(1)
+  .write
+  .mode("overwrite")
+  .option("header", "true")
+  .csv("hdfs://localhost:9000/user/rashi/employment_analysis")
+
+treatmentGap
+  .coalesce(1)
+  .write
+  .mode("overwrite")
+  .option("header", "true")
+  .csv("hdfs://localhost:9000/user/rashi/treatment_gap")
